@@ -21,11 +21,73 @@
 #include "httplib.hpp"
 #include "yyjson.hpp"
 
+#include "discovery.hpp"
 #include "play.h"
 
 using namespace duckdb_yyjson; // NOLINT
 
 namespace duckdb {
+
+// Settings management
+static std::string GetConfigValue(ClientContext &context, const string &var_name, const string &default_value) {
+    Value value;
+    auto &config = ClientConfig::GetConfig(context);
+    if (!config.GetUserVariable(var_name, value) || value.IsNull()) {
+        return default_value;
+    }
+    return value.ToString();
+}
+
+static void SetConfigValue(DataChunk &args, ExpressionState &state, Vector &result, 
+                          const string &var_name, const string &value_type) {
+    UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(),
+        [&](string_t value) {
+            try {
+                if (value == "" || value.GetSize() == 0) {
+                    throw std::invalid_argument(value_type + " cannot be empty.");
+                }
+                
+                ClientConfig::GetConfig(state.GetContext()).SetUserVariable(
+                    var_name,
+                    Value::CreateValue(value.GetString())
+                );
+                return StringVector::AddString(result, value_type + " set to: " + value.GetString());
+            } catch (std::exception &e) {
+                return StringVector::AddString(result, "Failed to set " + value_type + ": " + e.what());
+            }
+        });
+}
+
+static void SetEnvValue(DataChunk &args, ExpressionState &state, Vector &result,
+                       const string &var_name, const string &value_type) {
+    UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(),
+        [&](string_t value) {
+            try {
+                if (value == "" || value.GetSize() == 0) {
+                    throw std::invalid_argument(value_type + " cannot be empty.");
+                }
+#ifdef _WIN32
+                _putenv_s(var_name.c_str(), value.GetString().c_str());
+#else
+                setenv(var_name.c_str(), value.GetString().c_str(), true);
+#endif
+                auto new_value = std::getenv("DUCKDB_HTTPSERVER_DISCOVERY");
+                return StringVector::AddString(result, value_type + " set ENV " + var_name + " to: " + new_value);
+            } catch (std::exception &e) {
+                return StringVector::AddString(result, "Failed to set ENV " + var_name + " to " + value_type + ": " + e.what());
+            }
+        });
+}
+
+static void SetEnableDiscovery(DataChunk &args, ExpressionState &state, Vector &result) {
+    //SetConfigValue(args, state, result, "httpserve__enable_discovery", "Enable Discovery API");
+    SetEnvValue(args, state, result, "DUCKDB_HTTPSERVER_DISCOVERY", "Enable Discovery API");
+}
+
+static void SetEnableForeground(DataChunk &args, ExpressionState &state, Vector &result) {
+    SetEnvValue(args, state, result, "DUCKDB_HTTPSERVER_FOREGROUND", "Enable Foreground Execution");
+}
+
 
 struct HttpServerState {
     std::unique_ptr<duckdb_httplib_openssl::Server> server;
@@ -323,7 +385,6 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
             return;
         }
 
-
         ReqStats stats{
             static_cast<float>(elapsed.count()) / 1000,
             0,
@@ -350,6 +411,143 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
     }
 }
 
+// Discovery Functions
+void HandleDiscoverySubscribe(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+
+    string path = req.path;
+    string hash = path.substr(path.find_last_of('/') + 1);
+
+    auto doc = yyjson_read(req.body.c_str(), req.body.length(), 0);
+    if (!doc) {
+        res.status = 400;
+        res.set_content("Invalid JSON", "text/plain");
+        return;
+    }
+
+    auto root = yyjson_doc_get_root(doc);
+    PeerData data;
+    auto name_val = yyjson_obj_get(root, "name");
+    auto endpoint_val = yyjson_obj_get(root, "endpoint");
+    auto ttl_val = yyjson_obj_get(root, "ttl");
+    auto metadata_val = yyjson_obj_get(root, "metadata");
+
+    data.name = name_val ? yyjson_get_str(name_val) : "";
+    data.endpoint = endpoint_val ? yyjson_get_str(endpoint_val) : "";
+    data.ttl = ttl_val ? yyjson_get_int(ttl_val) : 300;
+    data.metadata = metadata_val ? yyjson_get_str(metadata_val) : "false";
+    data.sourceAddress = req.remote_addr;
+
+    try {
+        PeerDiscovery::Instance().registerPeer(hash, data);
+        std::string peerId = PeerDiscovery::generateDeterministicId(data.name, data.endpoint);
+        
+        auto rdoc = yyjson_mut_doc_new(nullptr);
+        auto rroot = yyjson_mut_obj(rdoc);
+        yyjson_mut_doc_set_root(rdoc, rroot);
+        
+        yyjson_mut_obj_add_str(rdoc, rroot, "peerId", peerId.c_str());
+        yyjson_mut_obj_add_str(rdoc, rroot, "message", "Successfully registered");
+        yyjson_mut_obj_add_int(rdoc, rroot, "ttl", data.ttl);
+        
+        char* json = yyjson_mut_write(rdoc, 0, nullptr);
+
+        res.set_content(json, "application/json");
+        free(json);
+        yyjson_mut_doc_free(rdoc);
+    } catch (const Exception& ex) {
+        res.status = 500;
+        res.set_content(ex.what(), "text/plain");
+    }
+
+    yyjson_doc_free(doc);
+
+    // cleanup expired
+    // PeerDiscovery::Instance().cleanupExpired();
+}
+
+
+void HandleDiscoveryGet(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+    std::string path = req.path;
+    std::string hash = path.substr(path.find_last_of('/') + 1);
+
+    // Set default format to JSONCompact
+    std::string format = "JSONEachRow";
+
+    // Check for format in URL parameter or header
+    if (req.has_param("default_format")) {
+        format = req.get_param_value("default_format");
+    } else if (req.has_header("X-ClickHouse-Format")) {
+        format = req.get_header_value("X-ClickHouse-Format");
+    } else if (req.has_header("format")) {
+        format = req.get_header_value("format");
+    }
+
+    try {
+        auto start = std::chrono::system_clock::now();
+        auto result = PeerDiscovery::Instance().getPeers(hash, false);
+        auto end = std::chrono::system_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        // Check if the result has an error using HasError() and GetError()
+        if (!result || result->HasError()) {
+            res.status = 500;
+            res.set_content(result ? result->GetError() : "Query failed", "text/plain");
+            return;
+        }
+
+        ReqStats stats{
+            static_cast<float>(elapsed.count()) / 1000,
+            0,
+            0
+        };
+
+        // Format Options
+        if (format == "JSONEachRow") {
+            std::string json_output = ConvertResultToNDJSON(*result);
+            res.set_content(json_output, "application/x-ndjson");
+        } else if (format == "JSONCompact") {
+            std::string json_output = ConvertResultToJSON(*result, stats);
+            res.set_content(json_output, "application/json");
+        } else {
+            // Default to NDJSON for DuckDB's own queries
+            std::string json_output = ConvertResultToNDJSON(*result);
+            res.set_content(json_output, "application/x-ndjson");
+        }
+
+    } catch (const std::exception& ex) {
+        res.status = 500;
+        res.set_content(ex.what(), "text/plain");
+    }
+}
+
+
+void HandleHeartbeat(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+    const auto& hash = req.path_params.at("secretHash");
+    const auto& peerId = req.path_params.at("peerId");
+    
+    try {
+        PeerDiscovery::Instance().updateHeartbeat(hash, peerId);
+        res.set_content("{\"message\":\"Heartbeat received\"}", "application/json");
+    } catch (const Exception& ex) {
+        res.status = 404;
+        res.set_content("{\"error\":\"Peer not found\"}", "application/json");
+    }
+}
+
+void HandleUnsubscribe(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+    const auto& hash = req.path_params.at("secretHash");
+    const auto& peerId = req.path_params.at("peerId");
+    
+    try {
+        PeerDiscovery::Instance().removePeer(hash, peerId);
+        res.set_content("{\"message\":\"Successfully unsubscribed\"}", "application/json");
+    } catch (const Exception& ex) {
+        res.status = 500;
+        res.set_content(ex.what(), "text/plain");
+    }
+}
+
+// Server Start
 void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t auth = string_t()) {
     if (global_state.is_running) {
         throw IOException("HTTP server is already running");
@@ -379,10 +577,37 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
     global_state.server->Get("/", HandleHttpRequest);
     global_state.server->Post("/", HandleHttpRequest);
 
+
+    const char* discovery_service_env = std::getenv("DUCKDB_HTTPSERVER_DISCOVERY");
+    bool discovery_service = (discovery_service_env != nullptr && (std::string(discovery_service_env) == "1" || std::string(discovery_service_env) == "true" ) );
+
+    if (discovery_service) {
+
+	    // Handle Discovery API
+	    global_state.server->Post("/subscribe/[^/]+", [&](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+	        HandleDiscoverySubscribe(req, res);
+	    });
+
+	    global_state.server->Get("/discovery/[^/]+", [&](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+	        HandleDiscoveryGet(req, res);
+	    });
+
+	    global_state.server->Post("/heartbeat/[^/]+/[^/]+", [&](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+	        HandleHeartbeat(req, res);
+	    });
+
+	    global_state.server->Delete("/unsubscribe/[^/]+/[^/]+", [&](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+	        HandleUnsubscribe(req, res);
+	    });
+    }
+
     // Health check endpoint
     global_state.server->Get("/ping", [](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
         res.set_content("OK", "text/plain");
     });
+
+    // Initialize PeerDiscovery with the database instance
+    PeerDiscovery::Initialize(db);
 
     string host_str = host.GetString();
 
@@ -423,7 +648,7 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
 #endif
 
     const char* run_in_same_thread_env = std::getenv("DUCKDB_HTTPSERVER_FOREGROUND");
-    bool run_in_same_thread = (run_in_same_thread_env != nullptr && std::string(run_in_same_thread_env) == "1");
+    bool run_in_same_thread = (run_in_same_thread_env != nullptr && ( std::string(run_in_same_thread_env) == "1" || std::string(run_in_same_thread_env) == "true" ));
 
     if (run_in_same_thread) {
 #ifdef _WIN32
@@ -507,6 +732,13 @@ static void LoadInternal(DatabaseInstance &instance) {
 
     ExtensionUtil::RegisterFunction(instance, httpserve_start);
     ExtensionUtil::RegisterFunction(instance, httpserve_stop);
+
+    // Register settings functions
+    ExtensionUtil::RegisterFunction(instance, ScalarFunction(
+        "httpserve_enable_discovery", {LogicalType::VARCHAR}, LogicalType::VARCHAR, SetEnableDiscovery));
+
+    ExtensionUtil::RegisterFunction(instance, ScalarFunction(
+        "httpserve_enable_foreground", {LogicalType::VARCHAR}, LogicalType::VARCHAR, SetEnableForeground));
 
     // Register the cleanup function to be called at exit
     std::atexit(HttpServerCleanup);
