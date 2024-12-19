@@ -40,37 +40,11 @@ struct HttpServerState {
 
 static HttpServerState global_state;
 
-std::string GetColumnType(MaterializedQueryResult &result, idx_t column) {
+std::string GetColumnTypeName(MaterializedQueryResult &result, idx_t column) {
 	if (result.RowCount() == 0) {
 		return "String";
 	}
-	switch (result.types[column].id()) {
-		case LogicalTypeId::FLOAT:
-			return "Float";
-		case LogicalTypeId::DOUBLE:
-			return "Double";
-		case LogicalTypeId::INTEGER:
-			return "Int32";
-		case LogicalTypeId::BIGINT:
-			return "Int64";
-		case LogicalTypeId::UINTEGER:
-			return "UInt32";
-		case LogicalTypeId::UBIGINT:
-			return "UInt64";
-		case LogicalTypeId::VARCHAR:
-			return "String";
-		case LogicalTypeId::TIME:
-			return "DateTime";
-		case LogicalTypeId::DATE:
-			return "Date";
-		case LogicalTypeId::TIMESTAMP:
-			return "DateTime";
-		case LogicalTypeId::BOOLEAN:
-			return "Int8";
-		default:
-			return "String";
-	}
-	return "String";
+	return result.types[column].ToString();
 }
 
 struct ReqStats {
@@ -90,30 +64,17 @@ static std::string ConvertResultToJSON(MaterializedQueryResult &result, ReqStats
         auto column_obj = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, column_obj, "name", result.ColumnName(col).c_str());
         yyjson_mut_arr_append(meta_array, column_obj);
-        std::string tp(GetColumnType(result, col));
+        std::string tp(GetColumnTypeName(result, col));
         yyjson_mut_obj_add_strcpy(doc, column_obj, "type", tp.c_str());
     }
     yyjson_mut_obj_add_val(doc, root, "meta", meta_array);
 
-    // Add data
-    auto data_array = yyjson_mut_arr(doc);
-    for (idx_t row = 0; row < result.RowCount(); ++row) {
-        auto row_array = yyjson_mut_arr(doc);
-        for (idx_t col = 0; col < result.ColumnCount(); ++col) {
-            Value value = result.GetValue(col, row);
-            if (value.IsNull()) {
-                yyjson_mut_arr_append(row_array, yyjson_mut_null(doc));
-            } else {
-                std::string value_str = value.ToString();
-                yyjson_mut_arr_append(row_array, yyjson_mut_strncpy(doc, value_str.c_str(), value_str.length()));
-            }
-        }
-        yyjson_mut_arr_append(data_array, row_array);
-    }
+    ResultSerializer serializer;
+    auto data_array = serializer.Serialize(result);
     yyjson_mut_obj_add_val(doc, root, "data", data_array);
 
     // Add row count
-    yyjson_mut_obj_add_int(doc, root, "rows", result.RowCount());
+    yyjson_mut_obj_add_uint(doc, root, "rows", result.RowCount());
     //"statistics":{"elapsed":0.00031403,"rows_read":1,"bytes_read":0}}
     auto stat_obj = yyjson_mut_obj_add_obj(doc, root, "statistics");
     yyjson_mut_obj_add_real(doc, stat_obj, "elapsed", req_stats.elapsed_sec);
