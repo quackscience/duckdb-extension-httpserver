@@ -106,7 +106,7 @@ Browse to your endpoint and use the built-in quackplay interface _(experimental)
 Query your API endpoint using curl GET/POST requests
 
 ```bash
-curl -X POST -d "SELECT 'hello', version()" "http://localhost:9999/?default_format=JSONCompact
+curl -X POST -d "SELECT 'hello', version()" "http://localhost:9999/?default_format=JSONCompact"
 ```
 ```json
 {
