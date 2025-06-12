@@ -38,7 +38,7 @@ struct HttpServerState {
 
 static HttpServerState global_state;
 
-// New: Base64 decoding function
+// Base64 decoding function
 std::string base64_decode(const std::string &in) {
     std::string out;
     std::vector<int> T(256, -1);
