@@ -38,7 +38,7 @@ struct HttpServerState {
 
 static HttpServerState global_state;
 
-// New: Base64 decoding function
+// Base64 decoding function
 std::string base64_decode(const std::string &in) {
     std::string out;
     std::vector<int> T(256, -1);
@@ -123,6 +123,54 @@ static std::string ConvertResultToNDJSON(MaterializedQueryResult &result) {
     return ndjson_output;
 }
 
+static std::string ConvertResultToCSV(MaterializedQueryResult &result) {
+    std::string csv_output;
+    
+    // Add header row
+    for (idx_t col = 0; col < result.ColumnCount(); ++col) {
+        if (col > 0) {
+            csv_output += ",";
+        }
+        csv_output += result.ColumnName(col);
+    }
+    csv_output += "\n";
+
+    // Add data rows
+    for (idx_t row = 0; row < result.RowCount(); ++row) {
+        for (idx_t col = 0; col < result.ColumnCount(); ++col) {
+            if (col > 0) {
+                csv_output += ",";
+            }
+            Value value = result.GetValue(col, row);
+            if (value.IsNull()) {
+                // Leave empty for NULL values
+                continue;
+            }
+            
+            std::string value_str = value.ToString();
+            // Escape quotes and wrap in quotes if contains special characters
+            if (value_str.find_first_of(",\"\n\r") != std::string::npos) {
+                std::string escaped;
+                escaped.reserve(value_str.length() + 2);
+                escaped += '"';
+                for (char c : value_str) {
+                    if (c == '"') {
+                        escaped += '"'; // Double the quotes to escape
+                    }
+                    escaped += c;
+                }
+                escaped += '"';
+                csv_output += escaped;
+            } else {
+                csv_output += value_str;
+            }
+        }
+        csv_output += "\n";
+    }
+    
+    return csv_output;
+}
+
 // Handle both GET and POST requests
 void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
     std::string query;
@@ -165,7 +213,7 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
         return;
     }
 
-    // Set default format to JSONCompact
+    // Set default format to JSONEachRow
     std::string format = "JSONEachRow";
 
     // Check for format in URL parameter or header
@@ -209,6 +257,10 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
         	ResultSerializerCompactJson serializer;
         	std::string json_output = serializer.Serialize(*result, stats);
             res.set_content(json_output, "application/json");
+        } else if (format == "CSV") {
+            std::string csv_output = ConvertResultToCSV(*result);
+            res.set_header("Content-Type", "text/csv");
+            res.set_content(csv_output, "text/csv");
         } else {
             // Default to NDJSON for DuckDB's own queries
             std::string json_output = ConvertResultToNDJSON(*result);
@@ -217,7 +269,7 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
 
     } catch (const Exception& ex) {
         res.status = 500;
-        std::string error_message = "Code: 59, e.displayText() = DB::Exception: " + std::string(ex.what());
+        std::string error_message = "DB::Exception: " + std::string(ex.what());
         res.set_content(error_message, "text/plain");
     }
 }
