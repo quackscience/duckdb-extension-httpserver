@@ -290,6 +290,10 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
 
     if (base_path_env && base_path_env[0] == '/' && strlen(base_path_env) > 1) {
         base_path = std::string(base_path_env);
+        // Ensure trailing slash for consistent endpoint joining
+        if (base_path.back() != '/') {
+            base_path += '/';
+        }
     }
 
     // CORS Preflight
@@ -312,7 +316,8 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
     global_state.server->Post(base_path, HandleHttpRequest);
 
     // Health check endpoint
-    global_state.server->Get("/ping", [](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+    // Health check endpoint, now relative to base_path
+    global_state.server->Get(base_path + "ping", [](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
         res.set_content("OK", "text/plain");
     });
 
