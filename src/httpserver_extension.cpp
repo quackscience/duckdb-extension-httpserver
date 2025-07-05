@@ -171,6 +171,50 @@ static std::string ConvertResultToCSV(MaterializedQueryResult &result) {
     return csv_output;
 }
 
+static std::string EscapeXML(const std::string &in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        switch (c) {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            case '\'': out += "&apos;"; break;
+            default:   out += c;        break;
+        }
+    }
+    return out;
+}
+
+static std::string ConvertResultToXML(MaterializedQueryResult &result) {
+    std::string xml;
+    xml += "<results>\n";
+
+    for (idx_t row = 0; row < result.RowCount(); ++row) {
+        xml += "  <row>\n";
+
+        for (idx_t col = 0; col < result.ColumnCount(); ++col) {
+            const std::string &col_name = result.ColumnName(col);   // keep original
+            Value val = result.GetValue(col, row);
+
+            xml += "    <column name=\"";
+            xml += EscapeXML(col_name);
+            xml += "\">";
+
+            if (!val.IsNull()) {
+                xml += EscapeXML(val.ToString());
+            }
+
+            xml += "</column>\n";
+        }
+        xml += "  </row>\n";
+    }
+
+    xml += "</results>\n";
+    return xml;
+}
+
 // Handle both GET and POST requests
 void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
     std::string query;
@@ -261,6 +305,10 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
             std::string csv_output = ConvertResultToCSV(*result);
             res.set_header("Content-Type", "text/csv");
             res.set_content(csv_output, "text/csv");
+        } else if (format == "XML") {
+            std::string xml_output = ConvertResultToXML(*result);
+            res.set_header("Content-Type", "application/xml");
+            res.set_content(xml_output, "application/xml");
         } else {
             // Default to NDJSON for DuckDB's own queries
             std::string json_output = ConvertResultToNDJSON(*result);
