@@ -19,8 +19,8 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.3.0
     with:
-      duckdb_version: v1.3.0
-      ci_tools_version: v1.3.0
+      duckdb_version: v1.3.1
+      ci_tools_version: v1.3.1
       extension_name: httpserver
 
 #  duckdb-next-build:
