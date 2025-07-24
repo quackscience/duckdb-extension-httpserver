@@ -222,7 +222,7 @@ void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httpli
     // CORS allow - set these headers for all requests
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT");
-    res.set_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization, X-ClickHouse-Format, format");
+    res.set_header("Access-Control-Allow-Headers", "*");
     res.set_header("Access-Control-Allow-Credentials", "true");
     res.set_header("Access-Control-Max-Age", "86400");
 
@@ -341,9 +341,9 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
     // CORS Preflight - no authentication required for OPTIONS requests
     global_state.server->Options(base_path,
     [](const duckdb_httplib_openssl::Request& /*req*/, duckdb_httplib_openssl::Response& res) {
-        res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+        res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT");
         res.set_header("Content-Type", "text/html; charset=utf-8");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization, X-ClickHouse-Format, format");
+        res.set_header("Access-Control-Allow-Headers", "*");
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Credentials", "true");
         res.set_header("Connection", "close");
