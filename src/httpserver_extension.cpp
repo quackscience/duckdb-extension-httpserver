@@ -219,23 +219,17 @@ static std::string ConvertResultToXML(MaterializedQueryResult &result) {
 void HandleHttpRequest(const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
     std::string query;
 
-    // Check authentication
-    if (!IsAuthenticated(req)) {
-        res.status = 401;
-        res.set_content("Unauthorized", "text/plain");
-        return;
-    }
-
-    // CORS allow
+    // CORS allow - set these headers for all requests
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT");
     res.set_header("Access-Control-Allow-Headers", "*");
     res.set_header("Access-Control-Allow-Credentials", "true");
     res.set_header("Access-Control-Max-Age", "86400");
 
-    // Handle preflight OPTIONS request
-    if (req.method == "OPTIONS") {
-        res.status = 204;  // No content
+    // Check authentication for actual requests (OPTIONS are handled separately)
+    if (!IsAuthenticated(req)) {
+        res.status = 401;
+        res.set_content("Unauthorized", "text/plain");
         return;
     }
 
@@ -344,15 +338,16 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
         }
     }
 
-    // CORS Preflight
+    // CORS Preflight - no authentication required for OPTIONS requests
     global_state.server->Options(base_path,
     [](const duckdb_httplib_openssl::Request& /*req*/, duckdb_httplib_openssl::Response& res) {
-        res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+        res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT");
         res.set_header("Content-Type", "text/html; charset=utf-8");
         res.set_header("Access-Control-Allow-Headers", "*");
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Credentials", "true");
         res.set_header("Connection", "close");
+        res.status = 204; // No content for preflight
         return duckdb_httplib_openssl::Server::HandlerResponse::Handled;
     });
 
@@ -363,9 +358,13 @@ void HttpServerStart(DatabaseInstance& db, string_t host, int32_t port, string_t
     global_state.server->Get(base_path, HandleHttpRequest);
     global_state.server->Post(base_path, HandleHttpRequest);
 
-    // Health check endpoint
-    // Health check endpoint, now relative to base_path
+    // Health check endpoint - no authentication required
     global_state.server->Get(base_path + "ping", [](const duckdb_httplib_openssl::Request& req, duckdb_httplib_openssl::Response& res) {
+        // Set CORS headers for health check endpoint
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        res.set_header("Access-Control-Allow-Credentials", "true");
         res.set_content("OK", "text/plain");
     });
 
